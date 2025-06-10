@@ -84,7 +84,7 @@ def fill_json():
 
 
 def test_api(stop_id):
-    url = f"http://172.252.236.136:2064/horaire/{stop_id}"
+    url = f"http://88.151.197.193:2001/horaire/{stop_id}"
     try:
         response = requests.get(url)
         response.raise_for_status()
