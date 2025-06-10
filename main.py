@@ -12,6 +12,62 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 import pyperclip
 
+def heure_to_minutes(heure_str, heure_actuelle=None):
+    """Convertit HH:MM en minutes depuis minuit, ou l'heure actuelle si 'Non spécifié'."""
+    if heure_str.lower().startswith("non spécifi"):
+        if heure_actuelle is None:
+            heure_actuelle = time.strftime("%H:%M")
+        heure_str = heure_actuelle
+    h, m = map(int, heure_str.split(":"))
+    return h * 60 + m
+
+def normalise_destination(dest):
+    """Normalise une destination pour faciliter la comparaison."""
+    return dest.lower().replace("é", "e").replace("è", "e").replace("à", "a").replace("ç", "c").strip()
+
+def annotate_departures(reel, theorique, heure_actuelle):
+    """
+    Ajoute un statut ('r', 'h', 'a') à chaque départ temps réel.
+    reel: liste de dicts [{'ligne', 'destination', 'depart'}]
+    theorique: liste de dicts [{'ligne', 'destination', 'heure'}]
+    heure_actuelle: string 'HH:MM'
+    """
+    for dep in reel:
+        # On convertit l'heure réelle (soit '2’', soit '12:50', soit 'Non spécifié') en HH:MM
+        if "'" in dep['depart']:
+            minutes = int(dep['depart'].replace("'", "").strip())
+            h, m = map(int, heure_actuelle.split(":"))
+            m += minutes
+            h += m // 60
+            m = m % 60
+            heure_reelle = f"{h:02d}:{m:02d}"
+        else:
+            heure_reelle = dep['depart']
+        if heure_reelle.lower().startswith("non spécifi"):
+            heure_reelle = heure_actuelle
+
+        min_ecart = None
+        statut = "h"
+        for theo in theorique:
+            if dep['ligne'] == theo['ligne'] and normalise_destination(dep['destination']) in normalise_destination(theo['destination']):
+                # Ignore les horaires théoriques non spécifiés
+                if theo['heure'].lower().startswith("non spécifi"):
+                    continue
+                ecart = heure_to_minutes(heure_reelle, heure_actuelle) - heure_to_minutes(theo['heure'], heure_actuelle)
+                if (min_ecart is None) or (abs(ecart) < abs(min_ecart)):
+                    min_ecart = ecart
+
+        # Applique les seuils
+        if min_ecart is not None:
+            if min_ecart > 3:
+                statut = "r"
+            elif min_ecart < -1:
+                statut = "a"
+            else:
+                statut = "h"
+        dep['statut'] = statut
+    return reel
+
 dir_url = 'http://www.t2c.fr/admin/synthese?SERVICE=page&p=17732927961956390&noline='
 stop_url = 'http://www.t2c.fr/admin/synthese?SERVICE=page&p=17732927961956392&numeroroute='
 
@@ -46,7 +102,6 @@ lines = {
     '37': '11822086460801032'
 }
 
-
 def get_line_data(url):
     item_list = OrderedDict()
     req = urllib.request.urlopen(url)
@@ -58,7 +113,6 @@ def get_line_data(url):
         item_list[item_name] = item_num
 
     return item_list
-
 
 def fill_json():
     data = {'lines': []}
@@ -82,7 +136,6 @@ def fill_json():
     with open('t2c_data.json', 'w', encoding='utf-8') as json_file:
         json.dump(data, json_file, ensure_ascii=False, indent=4)
 
-
 def test_api(stop_id):
     url = f"http://88.151.197.193:2001/horaire/{stop_id}"
     try:
@@ -96,32 +149,48 @@ def test_api(stop_id):
     except Exception as e:
         return {"error": f"Une erreur inattendue s'est produite : {e}"}
 
+def test_api_theorique(stop_id):
+    url = f"http://88.151.197.193:2001/horairetheorique/{stop_id}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        return {"error": f"Erreur lors de la requête : {e}"}
+    except json.JSONDecodeError:
+        return {"error": "Erreur lors du décodage de la réponse JSON"}
+    except Exception as e:
+        return {"error": f"Une erreur inattendue s'est produite : {e}"}
 
-def afficher_horaires(data):
+def afficher_horaires(data, data_theorique):
     fenetre_resultats = tk.Toplevel()
     fenetre_resultats.title("Résultats")
-    fenetre_resultats.geometry("500x300")
+    fenetre_resultats.geometry("650x350")
 
     text_widget = tk.Text(fenetre_resultats, wrap=tk.WORD)
     text_widget.pack(expand=True, fill=tk.BOTH)
 
-    if "error" in data:
-        text_widget.insert(tk.END, f"Erreur : {data['error']}\n")
+    if "error" in data or "error" in data_theorique:
+        text_widget.insert(tk.END, f"Erreur : {data.get('error', '')}\n{data_theorique.get('error', '')}\n")
     else:
         text_widget.insert(tk.END, f"Horaires pour l'arrêt :\n")
-        text_widget.insert(tk.END, "-" * 50 + "\n")
+        text_widget.insert(tk.END, "-" * 70 + "\n")
 
-        if "departures" in data:
-            for departure in data["departures"]:
-                text_widget.insert(tk.END,
-                                   f"Ligne {departure['ligne']:3} | {departure['destination']:20} | Départ : {departure['depart']:10} | {departure['info']}\n")
+        heure_actuelle = time.strftime("%H:%M")
+        if "departures" in data and "horaires" in data_theorique:
+            departures = annotate_departures(data["departures"], data_theorique["horaires"], heure_actuelle)
+            for departure in departures:
+                statut_txt = {"h": "à l'heure", "r": "retard", "a": "avance"}[departure['statut']]
+                text_widget.insert(
+                    tk.END,
+                    f"Ligne {departure['ligne']:3} | {departure['destination']:25} | Départ : {departure['depart']:10} | {statut_txt}\n"
+                )
 
         if "perturbation" in data and data["perturbation"]:
             text_widget.insert(tk.END, "\n⚠️ ATTENTION :\n")
             text_widget.insert(tk.END, data["perturbation"] + "\n")
 
     text_widget.config(state=tk.DISABLED)
-
 
 def horaire_bus():
     fenetre_horaire = tk.Toplevel()
@@ -135,13 +204,13 @@ def horaire_bus():
         stop_id = id_arret.get()
         if stop_id:
             data = test_api(stop_id)
-            afficher_horaires(data)
+            data_theorique = test_api_theorique(stop_id)
+            afficher_horaires(data, data_theorique)
         else:
             messagebox.showerror("Erreur", "Veuillez entrer un ID d'arrêt")
 
     button_send = tk.Button(fenetre_horaire, text="OK", command=send_request)
     button_send.pack(pady=10)
-
 
 def afficher_id_arrets():
     with open('t2c_data.json', 'r', encoding='utf-8') as json_file:
@@ -188,7 +257,6 @@ def afficher_id_arrets():
     instructions = tk.Label(fenetre_arrets, text="Double-cliquez sur une ligne pour copier l'ID de l'arrêt")
     instructions.pack(pady=5)
 
-
 def main():
     fenetre_menu = tk.Tk()
     fenetre_menu.title("T2C Bus")
@@ -204,7 +272,6 @@ def main():
     button_update.pack(pady=5)
 
     fenetre_menu.mainloop()
-
 
 if __name__ == "__main__":
     if not os.path.exists('t2c_data.json'):
